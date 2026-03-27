@@ -12,10 +12,6 @@ description = """
 A Rust DS18B20 temperature sensor driver for [embedded-hal](https://github.com/rust-embedded/embedded-hal)
 """
 
-[features]
-simulator = []
-chip-esp32s3 = []
-
 [dependencies]
 one-wire-bus = "0.1.1"
 embedded-hal = {version="0.2.3", features=["unproven"]}
