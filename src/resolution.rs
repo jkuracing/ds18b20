@@ -1,3 +1,5 @@
+use core::time::Duration;
+
 use embedded_hal_async::delay::DelayNs;
 
 #[repr(u8)]
@@ -10,19 +12,19 @@ pub enum Resolution {
 }
 
 impl Resolution {
-    pub fn max_measurement_time_millis(&self) -> u16 {
+    pub fn max_measurement_time_millis(&self) -> Duration {
         match self {
-            Resolution::Bits9 => 94,
-            Resolution::Bits10 => 188,
-            Resolution::Bits11 => 375,
-            Resolution::Bits12 => 750,
+            Resolution::Bits9 => Duration::from_millis(94),
+            Resolution::Bits10 => Duration::from_millis(188),
+            Resolution::Bits11 => Duration::from_millis(375),
+            Resolution::Bits12 => Duration::from_millis(750),
         }
     }
 
     /// Waits for the amount of time required to finish measuring temperature
     /// using this resolution.
     pub async fn delay_for_measurement_time(&self, delay: &mut impl DelayNs) {
-        delay.delay_ms(self.max_measurement_time_millis().into()).await;
+        delay.delay_ms(self.max_measurement_time_millis().as_millis() as u32).await;
     }
 
     pub(crate) fn from_config_register(config: u8) -> Option<Resolution> {

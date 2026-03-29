@@ -169,6 +169,19 @@ impl<O: OneWireAsync, const N: usize> Chain<O, N> {
         Ok(readings)
     }
 
+    /// Returns `true` if at least one device on the chain is currently alarmed.
+    ///
+    /// This performs a single alarm-search step and does not enumerate all addresses.
+    pub async fn any_device_alarmed(&mut self) -> OneWireResult<bool, O::BusError> {
+        let mut search = OneWireSearchAsync::with_family(
+            &mut self.onewire,
+            OneWireSearchKind::Alarmed,
+            FAMILY_CODE,
+        );
+
+        Ok(search.next().await?.is_some())
+    }
+
     /// Returns all alarmed devices currently present on this chain.
     ///
     /// The returned array is compacted from index 0 and padded with `None`.
