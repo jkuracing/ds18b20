@@ -1,8 +1,8 @@
 #![no_std]
 
-use embedded_hal::delay::DelayNs;
+use embedded_hal_async::delay::DelayNs;
 use embedded_onewire::{
-    OneWire, OneWireCrc, OneWireError, OneWireResult, OneWireSearch, OneWireSearchKind,
+    OneWireAsync, OneWireCrc, OneWireError, OneWireResult, OneWireSearchAsync, OneWireSearchKind,
 };
 
 pub const FAMILY_CODE: u8 = 0x28;
@@ -51,26 +51,26 @@ pub struct SensorData {
 }
 
 /// DS18B20 chain connected to a single 1-Wire bus.
-pub struct Chain<O: OneWire, const N: usize> {
+pub struct Chain<O: OneWireAsync, const N: usize> {
     devices: [Device; N],
     onewire: O,
 }
 
-impl<O: OneWire, const N: usize> Chain<O, N> {
+impl<O: OneWireAsync, const N: usize> Chain<O, N> {
     /// Initializes the chain by auto-discovering DS18B20 devices on the bus.
-    pub fn init(mut onewire: O) -> OneWireResult<Self, O::BusError> {
+    pub async fn init(mut onewire: O) -> OneWireResult<Self, O::BusError> {
         let mut search =
-            OneWireSearch::with_family(&mut onewire, OneWireSearchKind::Normal, FAMILY_CODE);
+            OneWireSearchAsync::with_family(&mut onewire, OneWireSearchKind::Normal, FAMILY_CODE);
 
         let mut devices = [Device { id: Address(0) }; N];
         for device in &mut devices {
-            let rom = search.next()?.ok_or(OneWireError::InvalidValue(
+            let rom = search.next().await?.ok_or(OneWireError::InvalidValue(
                 "not enough DS18B20 devices found during discovery",
             ))?;
             device.id = Address(rom);
         }
 
-        if search.next()?.is_some() {
+        if search.next().await?.is_some() {
             return Err(OneWireError::InvalidValue(
                 "found more DS18B20 devices than chain capacity",
             ));
@@ -104,25 +104,28 @@ impl<O: OneWire, const N: usize> Chain<O, N> {
     }
 
     /// Starts a temperature measurement for one device in the chain.
-    pub fn start_temp_measurement(&mut self, device: Device) -> OneWireResult<(), O::BusError> {
-        self.onewire.address(Some(device.id.0))?;
-        self.onewire.write_byte(commands::CONVERT_TEMP)?;
+    pub async fn start_temp_measurement(
+        &mut self,
+        device: Device,
+    ) -> OneWireResult<(), O::BusError> {
+        self.onewire.address(Some(device.id.0)).await?;
+        self.onewire.write_byte(commands::CONVERT_TEMP).await?;
         Ok(())
     }
 
     /// Starts a temperature measurement for all devices on this chain simultaneously.
-    pub fn start_simultaneous_temp_measurement(&mut self) -> OneWireResult<(), O::BusError> {
-        self.onewire.address(None)?;
-        self.onewire.write_byte(commands::CONVERT_TEMP)?;
+    pub async fn start_simultaneous_temp_measurement(&mut self) -> OneWireResult<(), O::BusError> {
+        self.onewire.address(None).await?;
+        self.onewire.write_byte(commands::CONVERT_TEMP).await?;
         Ok(())
     }
 
-    pub fn read_data(&mut self) -> OneWireResult<[DeviceTemperature; N], O::BusError> {
-        self.read_chain_temperatures()
+    pub async fn read_data(&mut self) -> OneWireResult<[DeviceTemperature; N], O::BusError> {
+        self.read_chain_temperatures().await
     }
 
-    fn read_device_data(&mut self, device: Device) -> OneWireResult<SensorData, O::BusError> {
-        let scratchpad = self.read_scratchpad(device)?;
+    async fn read_device_data(&mut self, device: Device) -> OneWireResult<SensorData, O::BusError> {
+        let scratchpad = self.read_scratchpad(device).await?;
 
         let resolution = if let Some(resolution) = Resolution::from_config_register(scratchpad[4]) {
             resolution
@@ -146,7 +149,7 @@ impl<O: OneWire, const N: usize> Chain<O, N> {
         })
     }
 
-    pub fn read_chain_temperatures(
+    pub async fn read_chain_temperatures(
         &mut self,
     ) -> OneWireResult<[DeviceTemperature; N], O::BusError> {
         let mut readings = [DeviceTemperature {
@@ -156,7 +159,7 @@ impl<O: OneWire, const N: usize> Chain<O, N> {
 
         let devices = self.devices;
         for (index, device) in devices.iter().copied().enumerate() {
-            let data = self.read_device_data(device)?;
+            let data = self.read_device_data(device).await?;
             readings[index] = DeviceTemperature {
                 id: device.id,
                 temperature: data.temperature,
@@ -169,14 +172,17 @@ impl<O: OneWire, const N: usize> Chain<O, N> {
     /// Returns all alarmed devices currently present on this chain.
     ///
     /// The returned array is compacted from index 0 and padded with `None`.
-    pub fn alarmed_devices(&mut self) -> OneWireResult<[Option<Device>; N], O::BusError> {
+    pub async fn alarmed_devices(&mut self) -> OneWireResult<[Option<Device>; N], O::BusError> {
         let mut alarmed = [None; N];
         let mut next_slot = 0;
 
-        let mut search =
-            OneWireSearch::with_family(&mut self.onewire, OneWireSearchKind::Alarmed, FAMILY_CODE);
+        let mut search = OneWireSearchAsync::with_family(
+            &mut self.onewire,
+            OneWireSearchKind::Alarmed,
+            FAMILY_CODE,
+        );
 
-        while let Some(rom) = search.next()? {
+        while let Some(rom) = search.next().await? {
             let address = Address(rom);
             if let Some(device) = self.devices.iter().copied().find(|d| d.id == address) {
                 if next_slot < N {
@@ -189,85 +195,97 @@ impl<O: OneWire, const N: usize> Chain<O, N> {
         Ok(alarmed)
     }
 
-    pub fn set_config(
+    pub async fn set_config(
         &mut self,
         device: Device,
         alarm_temp_low: i8,
         alarm_temp_high: i8,
         resolution: Resolution,
     ) -> OneWireResult<(), O::BusError> {
-        self.onewire.address(Some(device.id.0))?;
-        self.onewire.write_byte(commands::WRITE_SCRATCHPAD)?;
-        self.onewire.write_byte(alarm_temp_high.to_ne_bytes()[0])?;
-        self.onewire.write_byte(alarm_temp_low.to_ne_bytes()[0])?;
-        self.onewire.write_byte(resolution.to_config_register())?;
+        self.onewire.address(Some(device.id.0)).await?;
+        self.onewire.write_byte(commands::WRITE_SCRATCHPAD).await?;
+        self.onewire
+            .write_byte(alarm_temp_high.to_ne_bytes()[0])
+            .await?;
+        self.onewire
+            .write_byte(alarm_temp_low.to_ne_bytes()[0])
+            .await?;
+        self.onewire
+            .write_byte(resolution.to_config_register())
+            .await?;
         Ok(())
     }
 
     /// Broadcast scratchpad config to all devices on the chain.
-    pub fn simultaneous_set_config(
+    pub async fn simultaneous_set_config(
         &mut self,
         alarm_temp_low: i8,
         alarm_temp_high: i8,
         resolution: Resolution,
     ) -> OneWireResult<(), O::BusError> {
-        self.onewire.address(None)?;
-        self.onewire.write_byte(commands::WRITE_SCRATCHPAD)?;
-        self.onewire.write_byte(alarm_temp_high.to_ne_bytes()[0])?;
-        self.onewire.write_byte(alarm_temp_low.to_ne_bytes()[0])?;
-        self.onewire.write_byte(resolution.to_config_register())?;
+        self.onewire.address(None).await?;
+        self.onewire.write_byte(commands::WRITE_SCRATCHPAD).await?;
+        self.onewire
+            .write_byte(alarm_temp_high.to_ne_bytes()[0])
+            .await?;
+        self.onewire
+            .write_byte(alarm_temp_low.to_ne_bytes()[0])
+            .await?;
+        self.onewire
+            .write_byte(resolution.to_config_register())
+            .await?;
         Ok(())
     }
 
-    pub fn save_to_eeprom(
+    pub async fn save_to_eeprom(
         &mut self,
         device: Device,
         delay: &mut impl DelayNs,
     ) -> OneWireResult<(), O::BusError> {
-        self.onewire.address(Some(device.id.0))?;
-        self.onewire.write_byte(commands::COPY_SCRATCHPAD)?;
-        delay.delay_us(10_000); // write can take up to 10 ms
+        self.onewire.address(Some(device.id.0)).await?;
+        self.onewire.write_byte(commands::COPY_SCRATCHPAD).await?;
+        delay.delay_us(10_000).await; // write can take up to 10 ms
         Ok(())
     }
 
     /// Save config from scratchpad to EEPROM for all devices simultaneously.
-    pub fn simultaneous_save_to_eeprom(
+    pub async fn simultaneous_save_to_eeprom(
         &mut self,
         delay: &mut impl DelayNs,
     ) -> OneWireResult<(), O::BusError> {
-        self.onewire.address(None)?;
-        self.onewire.write_byte(commands::COPY_SCRATCHPAD)?;
-        delay.delay_us(10_000); // write can take up to 10 ms
+        self.onewire.address(None).await?;
+        self.onewire.write_byte(commands::COPY_SCRATCHPAD).await?;
+        delay.delay_us(10_000).await; // write can take up to 10 ms
         Ok(())
     }
 
-    pub fn recall_from_eeprom(
+    pub async fn recall_from_eeprom(
         &mut self,
         device: Device,
         delay: &mut impl DelayNs,
     ) -> OneWireResult<(), O::BusError> {
-        self.onewire.address(Some(device.id.0))?;
-        self.onewire.write_byte(commands::RECALL_EEPROM)?;
-        self.wait_recall_complete(delay)
+        self.onewire.address(Some(device.id.0)).await?;
+        self.onewire.write_byte(commands::RECALL_EEPROM).await?;
+        self.wait_recall_complete(delay).await
     }
 
     /// Recall config from EEPROM into scratchpad for all devices simultaneously.
-    pub fn simultaneous_recall_from_eeprom(
+    pub async fn simultaneous_recall_from_eeprom(
         &mut self,
         delay: &mut impl DelayNs,
     ) -> OneWireResult<(), O::BusError> {
-        self.onewire.address(None)?;
-        self.onewire.write_byte(commands::RECALL_EEPROM)?;
-        self.wait_recall_complete(delay)
+        self.onewire.address(None).await?;
+        self.onewire.write_byte(commands::RECALL_EEPROM).await?;
+        self.wait_recall_complete(delay).await
     }
 
-    fn read_scratchpad(&mut self, device: Device) -> OneWireResult<[u8; 9], O::BusError> {
-        self.onewire.address(Some(device.id.0))?;
-        self.onewire.write_byte(commands::READ_SCRATCHPAD)?;
+    async fn read_scratchpad(&mut self, device: Device) -> OneWireResult<[u8; 9], O::BusError> {
+        self.onewire.address(Some(device.id.0)).await?;
+        self.onewire.write_byte(commands::READ_SCRATCHPAD).await?;
 
         let mut scratchpad = [0_u8; 9];
         for byte in &mut scratchpad {
-            *byte = self.onewire.read_byte()?;
+            *byte = self.onewire.read_byte().await?;
         }
 
         if !OneWireCrc::validate(&scratchpad) {
@@ -277,13 +295,16 @@ impl<O: OneWire, const N: usize> Chain<O, N> {
         Ok(scratchpad)
     }
 
-    fn wait_recall_complete(&mut self, delay: &mut impl DelayNs) -> OneWireResult<(), O::BusError> {
+    async fn wait_recall_complete(
+        &mut self,
+        delay: &mut impl DelayNs,
+    ) -> OneWireResult<(), O::BusError> {
         // Recall can take up to 10 ms according to DS18B20 datasheet.
         for _ in 0..10 {
-            if self.onewire.read_bit()? {
+            if self.onewire.read_bit().await? {
                 return Ok(());
             }
-            delay.delay_ms(1);
+            delay.delay_ms(1).await;
         }
 
         Err(OneWireError::InvalidValue("recall from EEPROM timed out"))
