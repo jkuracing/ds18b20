@@ -35,7 +35,7 @@ impl Resolution {
         }
     }
 
-    pub(crate) fn to_config_register(&self) -> u8 {
-        *self as u8
+    pub(crate) fn to_config_register(self) -> u8 {
+        self as u8
     }
 }

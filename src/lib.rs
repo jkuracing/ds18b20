@@ -225,7 +225,7 @@ where
     // wait for the recall to finish (up to 10ms)
     let max_retries = (10000 / one_wire_bus::READ_SLOT_DURATION_MICROS) + 1;
     for _ in 0..max_retries {
-        if onewire.read_bit(delay)? == true {
+        if onewire.read_bit(delay)? {
             return Ok(());
         }
     }
