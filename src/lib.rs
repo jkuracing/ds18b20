@@ -1,7 +1,9 @@
 #![no_std]
 
 use embedded_hal::delay::DelayNs;
-use embedded_onewire::{OneWire, OneWireCrc, OneWireError, OneWireResult, OneWireSearch, OneWireSearchKind};
+use embedded_onewire::{
+    OneWire, OneWireCrc, OneWireError, OneWireResult, OneWireSearch, OneWireSearchKind,
+};
 
 pub const FAMILY_CODE: u8 = 0x28;
 
@@ -57,13 +59,14 @@ pub struct Chain<O: OneWire, const N: usize> {
 impl<O: OneWire, const N: usize> Chain<O, N> {
     /// Initializes the chain by auto-discovering DS18B20 devices on the bus.
     pub fn init(mut onewire: O) -> OneWireResult<Self, O::BusError> {
-        let mut search = OneWireSearch::with_family(&mut onewire, OneWireSearchKind::Normal, FAMILY_CODE);
+        let mut search =
+            OneWireSearch::with_family(&mut onewire, OneWireSearchKind::Normal, FAMILY_CODE);
 
         let mut devices = [Device { id: Address(0) }; N];
         for device in &mut devices {
-            let rom = search
-                .next()?
-                .ok_or(OneWireError::InvalidValue("not enough DS18B20 devices found during discovery"))?;
+            let rom = search.next()?.ok_or(OneWireError::InvalidValue(
+                "not enough DS18B20 devices found during discovery",
+            ))?;
             device.id = Address(rom);
         }
 
@@ -88,10 +91,7 @@ impl<O: OneWire, const N: usize> Chain<O, N> {
         Ok(device)
     }
 
-    pub fn device_by_address(
-        &self,
-        address: Address,
-    ) -> OneWireResult<Device, O::BusError> {
+    pub fn device_by_address(&self, address: Address) -> OneWireResult<Device, O::BusError> {
         let Some(device) = self.devices.iter().copied().find(|d| d.id == address) else {
             return Err(OneWireError::InvalidValue("device address not in chain"));
         };
@@ -124,8 +124,7 @@ impl<O: OneWire, const N: usize> Chain<O, N> {
     fn read_device_data(&mut self, device: Device) -> OneWireResult<SensorData, O::BusError> {
         let scratchpad = self.read_scratchpad(device)?;
 
-        let resolution = if let Some(resolution) = Resolution::from_config_register(scratchpad[4])
-        {
+        let resolution = if let Some(resolution) = Resolution::from_config_register(scratchpad[4]) {
             resolution
         } else {
             return Err(OneWireError::InvalidValue("invalid config register"));
@@ -147,14 +146,13 @@ impl<O: OneWire, const N: usize> Chain<O, N> {
         })
     }
 
-    pub fn read_chain_temperatures(&mut self) -> OneWireResult<[DeviceTemperature; N], O::BusError> {
-        let mut readings = [
-            DeviceTemperature {
-                id: Address(0),
-                temperature: 0.0,
-            };
-            N
-        ];
+    pub fn read_chain_temperatures(
+        &mut self,
+    ) -> OneWireResult<[DeviceTemperature; N], O::BusError> {
+        let mut readings = [DeviceTemperature {
+            id: Address(0),
+            temperature: 0.0,
+        }; N];
 
         let devices = self.devices;
         for (index, device) in devices.iter().copied().enumerate() {
