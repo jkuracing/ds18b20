@@ -1,0 +1,13 @@
+name: Publish
+
+# Publishes the workspace crates to crates.vs via the shared reusable workflow
+# in vs-website. Push-to-default-branch, version-driven, skip-if-already-published.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    uses: jkuracing/vs-website/.github/workflows/publish-crates.yml@main
+    secrets: inherit
