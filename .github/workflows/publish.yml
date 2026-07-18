@@ -71,13 +71,17 @@ jobs:
 
       - name: Package publishable crates
         run: |
-          mkdir -p dist
+          # Write the crate list OUTSIDE the repo tree: for a root-level crate,
+          # a dist/ dir inside the working tree makes `cargo package` fail its
+          # dirty-tree check. --no-verify: a registry publish doesn't need a host
+          # verify build (esp/no_std crates can't build for the host target).
+          TSV="$RUNNER_TEMP/publishable.tsv"
           cargo metadata --format-version 1 --no-deps \
             | jq -r '.packages[] | select(.publish != []) | "\(.name)\t\(.version)"' \
-            > dist/publishable.tsv
-          echo "Publishable crates:"; cat dist/publishable.tsv
-          cut -f1 dist/publishable.tsv | while read -r name; do
-            cargo package -p "$name"
+            > "$TSV"
+          echo "Publishable crates:"; cat "$TSV"
+          cut -f1 "$TSV" | while read -r name; do
+            cargo package -p "$name" --no-verify
           done
 
       - name: Set up vsp1 SSH
@@ -116,7 +120,7 @@ jobs:
               echo "add  ${name}@${version}"
               margo add --registry registry "target/package/${name}-${version}.crate"
             fi
-          done < dist/publishable.tsv
+          done < "$RUNNER_TEMP/publishable.tsv"
 
           "${RSYNC[@]}" registry/ "${VSP_REMOTE}:${REGISTRY_DIR}/"
           echo "Registry synced."
