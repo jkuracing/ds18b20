@@ -1,13 +1,122 @@
 name: Publish
 
-# Publishes the workspace crates to crates.vs via the shared reusable workflow
-# in vs-website. Push-to-default-branch, version-driven, skip-if-already-published.
+# =============================================================================
+# TODO(TEMPORARY -- REMOVE WHEN THIS REPO IS MADE PRIVATE)
+# =============================================================================
+# This workflow is INLINED from the shared reusable workflow
+#   jkuracing/vs-website/.github/workflows/publish-crates.yml
+# together with its `vsp-ssh` composite action (vendored under
+# .github/actions/vsp-ssh/).
+#
+# WHY IT IS INLINED:
+#   This repo is a PUBLIC fork. GitHub does not allow a PUBLIC repo to call a
+#   reusable workflow that lives in a PRIVATE repo (vs-website). The call never
+#   compiles -- the run fails with "workflow file issue" and ZERO jobs execute.
+#   That is exactly what happened on the first publish run here.
+#
+# THE PLAN IS TO MAKE THIS REPO PRIVATE. Once it is private:
+#   1. Delete .github/actions/vsp-ssh/  (the vendored composite action).
+#   2. Replace everything below with the ~10-line reusable-workflow caller:
+#
+#          on:
+#            push:
+#              branches: [master]
+#            workflow_dispatch:
+#
+#          jobs:
+#            publish:
+#              uses: jkuracing/vs-website/.github/workflows/publish-crates.yml@main
+#              secrets: inherit
+#
+# Until then, keep this file in sync with vs-website's publish-crates.yml.
+# =============================================================================
+
 on:
   push:
     branches: [master]
   workflow_dispatch:
 
+env:
+  SFTP_HOST: "vsp1.jkuracing.at"
+  REGISTRY_DIR: "/var/www/vsp/crates.vs.jkuracing.at"
+  BASE_URL: "https://crates.vs.jkuracing.at"
+  REGISTRY_NAME: "jkuracing"
+
+concurrency:
+  group: crates-vs-registry
+  cancel-in-progress: false
+
 jobs:
   publish:
-    uses: jkuracing/vs-website/.github/workflows/publish-crates.yml@main
-    secrets: inherit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Cache margo
+        id: margo-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/margo
+          key: margo-${{ runner.os }}-v1
+
+      - name: Install margo
+        if: steps.margo-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked margo --index sparse+https://integer32llc.github.io/margo/
+
+      - name: Package publishable crates
+        run: |
+          mkdir -p dist
+          cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.publish != []) | "\(.name)\t\(.version)"' \
+            > dist/publishable.tsv
+          echo "Publishable crates:"; cat dist/publishable.tsv
+          cut -f1 dist/publishable.tsv | while read -r name; do
+            cargo package -p "$name"
+          done
+
+      - name: Set up vsp1 SSH
+        uses: ./.github/actions/vsp-ssh
+        with:
+          sftp-host: ${{ env.SFTP_HOST }}
+          sftp-user: ${{ secrets.VS_REGISTRY_SFTP_USER }}
+          sftp-key: ${{ secrets.VS_REGISTRY_SFTP_KEY }}
+          sftp-known-hosts: ${{ secrets.VS_REGISTRY_SFTP_KNOWN_HOSTS }}
+          sftp-port: ${{ secrets.VS_REGISTRY_SFTP_PORT }}
+
+      - name: Sync registry and add new versions
+        run: |
+          RSYNC=(rsync -rltz --omit-dir-times --no-perms -e "ssh $VSP_SSH_OPTS -p $VSP_PORT")
+
+          ssh $VSP_SSH_OPTS -p "$VSP_PORT" "$VSP_REMOTE" "mkdir -p '$REGISTRY_DIR'"
+          mkdir -p registry
+          "${RSYNC[@]}" "${VSP_REMOTE}:${REGISTRY_DIR}/" registry/
+
+          if [ ! -f registry/config.json ]; then
+            margo init registry --base-url "$BASE_URL" --defaults
+          fi
+
+          # Enforce settings margo init can't set via flags (name + auth), and
+          # push them into the cargo-facing config.json which margo won't sync.
+          sed -i "s/^suggested_registry_name = .*/suggested_registry_name = \"${REGISTRY_NAME}\"/" registry/margo-config.toml
+          sed -i 's/^auth_required = .*/auth_required = true/' registry/margo-config.toml
+          margo generate-html --registry registry
+          sed -i 's/"auth-required":false/"auth-required":true/' registry/config.json
+
+          existing="$(margo list --registry registry 2>/dev/null || true)"
+          while IFS=$'\t' read -r name version; do
+            if printf '%s\n' "$existing" | awk -v n="$name" -v v="$version" '$1==n && $2==v{f=1} END{exit !f}'; then
+              echo "skip ${name}@${version} (already published)"
+            else
+              echo "add  ${name}@${version}"
+              margo add --registry registry "target/package/${name}-${version}.crate"
+            fi
+          done < dist/publishable.tsv
+
+          "${RSYNC[@]}" registry/ "${VSP_REMOTE}:${REGISTRY_DIR}/"
+          echo "Registry synced."
