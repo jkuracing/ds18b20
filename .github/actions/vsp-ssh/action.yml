@@ -1,0 +1,53 @@
+name: vsp-ssh
+description: >
+  Set up SSH to the shared vsp1 SFTP server from the VS_REGISTRY_SFTP_* secrets.
+  Writes ~/.ssh/id_deploy + known_hosts and exports VSP_SSH / VSP_REMOTE for
+  later steps in the same job.
+
+# TODO(TEMPORARY): vendored copy of jkuracing/vs-website/.github/actions/vsp-ssh.
+# Delete this whole directory once this repo is made PRIVATE and the publish
+# workflow goes back to calling the shared reusable workflow. See
+# .github/workflows/publish.yml for the full explanation.
+
+inputs:
+  sftp-host:
+    description: SFTP host to connect to.
+    default: "vsp1.jkuracing.at"
+  sftp-port:
+    description: SFTP port.
+    default: "22"
+  sftp-user:
+    description: SFTP user (VS_REGISTRY_SFTP_USER).
+    required: true
+  sftp-key:
+    description: SFTP private key (VS_REGISTRY_SFTP_KEY).
+    required: true
+  sftp-known-hosts:
+    description: Known hosts covering the SFTP host (VS_REGISTRY_SFTP_KNOWN_HOSTS).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SFTP_HOST: ${{ inputs.sftp-host }}
+        SFTP_PORT: ${{ inputs.sftp-port }}
+        SFTP_USER: ${{ inputs.sftp-user }}
+        SFTP_KEY: ${{ inputs.sftp-key }}
+        SFTP_KNOWN_HOSTS: ${{ inputs.sftp-known-hosts }}
+      run: |
+        if [ -z "$SFTP_USER" ] || [ -z "$SFTP_KEY" ] || [ -z "$SFTP_KNOWN_HOSTS" ]; then
+          echo "::error::Missing required VS_REGISTRY_SFTP_* org secrets"; exit 1
+        fi
+        install -d -m 700 ~/.ssh
+        printf '%s\n' "$SFTP_KEY" > ~/.ssh/id_deploy; chmod 600 ~/.ssh/id_deploy
+        printf '%s\n' "$SFTP_KNOWN_HOSTS" > ~/.ssh/known_hosts; chmod 644 ~/.ssh/known_hosts
+        # Exported for later job steps. Port is separate because ssh uses -p and
+        # sftp uses -P. Usage:
+        #   ssh   $VSP_SSH_OPTS -p "$VSP_PORT" "$VSP_REMOTE" "cmd"
+        #   sftp  $VSP_SSH_OPTS -P "$VSP_PORT" -b - "$VSP_REMOTE"
+        #   rsync -e "ssh $VSP_SSH_OPTS -p $VSP_PORT" src "$VSP_REMOTE":dst
+        echo "VSP_SSH_OPTS=-i $HOME/.ssh/id_deploy -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
+        echo "VSP_PORT=${SFTP_PORT:-22}" >> "$GITHUB_ENV"
+        echo "VSP_REMOTE=${SFTP_USER}@${SFTP_HOST}" >> "$GITHUB_ENV"
