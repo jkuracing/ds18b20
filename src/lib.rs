@@ -51,40 +51,80 @@ pub struct SensorData {
 }
 
 /// DS18B20 chain connected to a single 1-Wire bus.
+/// Temperatures read from one chain: a fixed-capacity buffer of which the
+/// first `len` entries are valid. Derefs to a slice of the valid entries.
+#[derive(Clone, Copy, Debug)]
+pub struct ChainReadings<const N: usize> {
+    data: [DeviceTemperature; N],
+    len: usize,
+}
+
+impl<const N: usize> ChainReadings<N> {
+    pub fn as_slice(&self) -> &[DeviceTemperature] {
+        &self.data[..self.len]
+    }
+}
+
+impl<const N: usize> core::ops::Deref for ChainReadings<N> {
+    type Target = [DeviceTemperature];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
 pub struct Chain<O: OneWireAsync, const N: usize> {
     devices: [Device; N],
+    /// Number of devices actually discovered on the bus (`<= N`).
+    len: usize,
     onewire: O,
 }
 
 impl<O: OneWireAsync, const N: usize> Chain<O, N> {
     /// Initializes the chain by auto-discovering DS18B20 devices on the bus.
+    ///
+    /// `N` is the chain *capacity*: any number of devices up to `N` is
+    /// accepted (including zero) and reported via [`Self::len`]. Discovering
+    /// more than `N` devices is an error.
     pub async fn init(mut onewire: O) -> OneWireResult<Self, O::BusError> {
         let mut search =
             OneWireSearchAsync::with_family(&mut onewire, OneWireSearchKind::Normal, FAMILY_CODE);
 
         let mut devices = [Device { id: Address(0) }; N];
-        for device in &mut devices {
-            let rom = search.next().await?.ok_or(OneWireError::InvalidValue(
-                "not enough DS18B20 devices found during discovery",
-            ))?;
+        let mut len = 0usize;
+        while let Some(rom) = search.next().await? {
+            let Some(device) = devices.get_mut(len) else {
+                return Err(OneWireError::InvalidValue(
+                    "found more DS18B20 devices than chain capacity",
+                ));
+            };
             device.id = Address(rom);
+            len += 1;
         }
 
-        if search.next().await?.is_some() {
-            return Err(OneWireError::InvalidValue(
-                "found more DS18B20 devices than chain capacity",
-            ));
-        }
-
-        Ok(Self { devices, onewire })
+        Ok(Self {
+            devices,
+            len,
+            onewire,
+        })
     }
 
-    pub fn devices(&self) -> &[Device; N] {
-        &self.devices
+    /// Number of devices discovered on the bus.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// `true` when no devices were discovered.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn devices(&self) -> &[Device] {
+        &self.devices[..self.len]
     }
 
     pub fn device_by_index(&self, index: usize) -> OneWireResult<Device, O::BusError> {
-        let Some(device) = self.devices.get(index).copied() else {
+        let Some(device) = self.devices[..self.len].get(index).copied() else {
             return Err(OneWireError::InvalidValue("device index out of range"));
         };
 
@@ -92,7 +132,11 @@ impl<O: OneWireAsync, const N: usize> Chain<O, N> {
     }
 
     pub fn device_by_address(&self, address: Address) -> OneWireResult<Device, O::BusError> {
-        let Some(device) = self.devices.iter().copied().find(|d| d.id == address) else {
+        let Some(device) = self.devices[..self.len]
+            .iter()
+            .copied()
+            .find(|d| d.id == address)
+        else {
             return Err(OneWireError::InvalidValue("device address not in chain"));
         };
 
@@ -120,7 +164,7 @@ impl<O: OneWireAsync, const N: usize> Chain<O, N> {
         Ok(())
     }
 
-    pub async fn read_data(&mut self) -> OneWireResult<[DeviceTemperature; N], O::BusError> {
+    pub async fn read_data(&mut self) -> OneWireResult<ChainReadings<N>, O::BusError> {
         self.read_chain_temperatures().await
     }
 
@@ -151,16 +195,19 @@ impl<O: OneWireAsync, const N: usize> Chain<O, N> {
 
     pub async fn read_chain_temperatures(
         &mut self,
-    ) -> OneWireResult<[DeviceTemperature; N], O::BusError> {
-        let mut readings = [DeviceTemperature {
-            id: Address(0),
-            temperature: 0.0,
-        }; N];
+    ) -> OneWireResult<ChainReadings<N>, O::BusError> {
+        let mut readings = ChainReadings {
+            data: [DeviceTemperature {
+                id: Address(0),
+                temperature: 0.0,
+            }; N],
+            len: self.len,
+        };
 
         let devices = self.devices;
-        for (index, device) in devices.iter().copied().enumerate() {
+        for (index, device) in devices[..self.len].iter().copied().enumerate() {
             let data = self.read_device_data(device).await?;
-            readings[index] = DeviceTemperature {
+            readings.data[index] = DeviceTemperature {
                 id: device.id,
                 temperature: data.temperature,
             };
