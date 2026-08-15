@@ -3,7 +3,7 @@ use core::time::Duration;
 use embedded_hal_async::delay::DelayNs;
 
 #[repr(u8)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Resolution {
     Bits9 = 0b00011111,
     Bits10 = 0b00111111,
