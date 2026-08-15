@@ -12,6 +12,35 @@ mod resolution;
 
 pub use resolution::Resolution;
 
+/// Converts the raw temperature register to degrees Celsius.
+///
+/// The register is a **signed** two's-complement value (DS18B20 datasheet,
+/// "Temperature Register Format") — bits above the resolution's data bits are
+/// sign-extension bits, not part of an unsigned magnitude. Reading it as
+/// unsigned turns any reading at or below 0 °C into a huge positive value:
+/// raw `0xFFFF` is `-0.0625 °C` as signed (`-1 / 16.0`), but `4095.9375 °C` if
+/// misread as unsigned `65535 / 16.0` — which a downstream `as i16` cast (a
+/// saturating conversion, not a panic) then collapses to exactly `i16::MAX`
+/// once scaled to centi-Celsius, indistinguishable from a real, if
+/// implausible, reading.
+///
+/// The scale is **always** 1/16 °C per LSB, regardless of the configured
+/// resolution -- this was previously a `match` dividing by 2/4/8/16 per
+/// resolution, which is wrong. The datasheet's own worked examples ("Table 1.
+/// Temperature/Data Relationship") use one constant scale throughout; the
+/// resolution setting only changes which of the register's low-order bits
+/// are guaranteed meaningful (masked to a fixed pattern at lower resolution,
+/// for a faster conversion), never the register's place-value. This only
+/// stayed hidden because nothing in this codebase had ever configured a
+/// resolution other than the factory-default 12-bit until now: at 9-bit, the
+/// old per-resolution divisor (÷2) produced real ~25 °C ambient readings as
+/// ~204-212 °C -- confirmed live, raw register 408 at "9-bit" decoded as
+/// 204.0 °C by the old code, and as 25.5 °C (matching ambient) once divided
+/// by 16 like every other resolution.
+fn raw_to_celsius(raw: i16, _resolution: Resolution) -> f32 {
+    (raw as f32) / 16.0
+}
+
 /// 64-bit ROM address of a 1-Wire device.
 ///
 /// Bits 0-7 contain the family code.
@@ -177,13 +206,8 @@ impl<O: OneWireAsync, const N: usize> Chain<O, N> {
             return Err(OneWireError::InvalidValue("invalid config register"));
         };
 
-        let raw_temp = u16::from_le_bytes([scratchpad[0], scratchpad[1]]);
-        let temperature = match resolution {
-            Resolution::Bits12 => (raw_temp as f32) / 16.0,
-            Resolution::Bits11 => (raw_temp as f32) / 8.0,
-            Resolution::Bits10 => (raw_temp as f32) / 4.0,
-            Resolution::Bits9 => (raw_temp as f32) / 2.0,
-        };
+        let raw_temp = i16::from_le_bytes([scratchpad[0], scratchpad[1]]);
+        let temperature = raw_to_celsius(raw_temp, resolution);
 
         Ok(SensorData {
             temperature,
@@ -368,5 +392,77 @@ impl<O: OneWireAsync, const N: usize> Chain<O, N> {
         }
 
         Err(OneWireError::InvalidValue("recall from EEPROM timed out"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Raw register values from the DS18B20 datasheet's own worked examples
+    // ("Temperature Register Format" table), 12-bit resolution throughout.
+    #[test]
+    fn positive_datasheet_examples_at_12_bit() {
+        assert_eq!(raw_to_celsius(0x07D0, Resolution::Bits12), 125.0);
+        assert_eq!(raw_to_celsius(0x0191, Resolution::Bits12), 25.0625);
+        assert_eq!(raw_to_celsius(0x00A2, Resolution::Bits12), 10.125);
+        assert_eq!(raw_to_celsius(0x0008, Resolution::Bits12), 0.5);
+        assert_eq!(raw_to_celsius(0x0000, Resolution::Bits12), 0.0);
+    }
+
+    // The whole point of the fix: these are negative in the datasheet, and a
+    // `u16` read would turn every one of them into several thousand degrees.
+    #[test]
+    fn negative_datasheet_examples_at_12_bit() {
+        assert_eq!(raw_to_celsius(-8_i16, Resolution::Bits12), -0.5); // 0xFFF8
+        assert_eq!(raw_to_celsius(-162_i16, Resolution::Bits12), -10.125); // 0xFF5E
+        assert_eq!(raw_to_celsius(-401_i16, Resolution::Bits12), -25.0625); // 0xFE6F
+        assert_eq!(raw_to_celsius(-880_i16, Resolution::Bits12), -55.0); // 0xFC90
+    }
+
+    // The exact case this fix was written for: a real board's raw scratchpad
+    // register was 0xFFFF (a benign, near-zero -0.0625 °C reading), and the
+    // old unsigned read turned it into a downstream report of 32767
+    // centi-Celsius — this is the arithmetic that connects the two.
+    #[test]
+    fn the_reported_0xffff_case_is_a_benign_near_zero_reading() {
+        let raw = i16::from_le_bytes(0xFFFFu16.to_le_bytes());
+        let celsius = raw_to_celsius(raw, Resolution::Bits12);
+        assert_eq!(celsius, -0.0625);
+
+        // What the old, buggy unsigned read would have produced instead —
+        // pinned here so nobody re-introduces it by "simplifying" the cast.
+        let buggy_unsigned_celsius = (0xFFFFu16 as f32) / 16.0;
+        assert_eq!(buggy_unsigned_celsius, 4095.9375);
+        assert_eq!((buggy_unsigned_celsius * 100.0) as i16, i16::MAX);
+    }
+
+    #[test]
+    fn scale_is_the_same_regardless_of_configured_resolution() {
+        // The register's place-value never changes with resolution -- only
+        // which low bits are guaranteed meaningful does. A raw count of 200
+        // (12.5 C at the one true 1/16 C scale) must decode identically no
+        // matter which `Resolution` the config register reports, because the
+        // driver has no way to know -- and no reason to assume -- that a
+        // lower-resolution device rescales its own register.
+        for resolution in [
+            Resolution::Bits9,
+            Resolution::Bits10,
+            Resolution::Bits11,
+            Resolution::Bits12,
+        ] {
+            assert_eq!(raw_to_celsius(200, resolution), 12.5);
+        }
+    }
+
+    // The live case this fix was written for: raw 408 at "9-bit" was
+    // reported by the OLD (per-resolution-divisor) code as 204.0 C, a value
+    // absurd enough to trip the plausibility fault -- but it is real,
+    // unremarkable ambient (25.5 C) once correctly divided by 16 like every
+    // other resolution.
+    #[test]
+    fn the_live_9_bit_ambient_case_that_used_to_read_as_204_degrees() {
+        assert_eq!(raw_to_celsius(408, Resolution::Bits9), 25.5);
+        assert_eq!(raw_to_celsius(424, Resolution::Bits9), 26.5);
     }
 }
